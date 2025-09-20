@@ -1,53 +1,59 @@
-from fastapi import FastAPI
+# api.py
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import joblib
-import pandas as pd
 from datetime import datetime
+import joblib
 
-# Load trained model and encoder
-model = joblib.load("geofence_risk_model.pkl")
-label_encoder = joblib.load("label_encoder.pkl")
+app = FastAPI(title="Geofence Risk API")
 
-app = FastAPI(title="Geofence Risk Prediction API")
+# Load trained model
+try:
+    model = joblib.load("geofence_risk_model.pkl")
+except Exception as e:
+    model = None
+    print("WARNING: model not loaded:", e)
 
-# Input format
-class RiskInput(BaseModel):
-    timestamp: str
+# Input schema
+class PredictRequest(BaseModel):
     latitude: float
     longitude: float
-
-@app.get("/")
-def root():
-    return {"message": "Geofence Risk Prediction API is running"}
+    timestamp: str
+    crime_rate: float
+    geo_risk: float
+    crowd_density: float
+    restricted_zone: int
 
 @app.post("/predict")
-def predict_risk(data: RiskInput):
-    # Convert timestamp to hour
+def predict(req: PredictRequest):
+    if model is None:
+        raise HTTPException(status_code=500, detail="Model not loaded")
+
+    # Parse timestamp → extract hour
     try:
-        hour = datetime.fromisoformat(data.timestamp).hour
-    except ValueError:
-        return {"error": "Invalid timestamp format. Use ISO format (YYYY-MM-DDTHH:MM:SS.mmmmmm)"}
+        ts = req.timestamp.replace("Z", "+00:00") if req.timestamp.endswith("Z") else req.timestamp
+        dt = datetime.fromisoformat(ts)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid timestamp format")
 
-    # Features
-    features = pd.DataFrame([{
-        "latitude": data.latitude,
-        "longitude": data.longitude,
-        "hour_of_day": hour
-    }])
+    hour = dt.hour
 
-    # Predict
-    risk_class = model.predict(features)[0]
-    risk_score = model.predict_proba(features).max()
+    # Feature vector
+    features = [[
+        req.latitude,
+        req.longitude,
+        hour,
+        req.crime_rate,
+        req.geo_risk,
+        req.crowd_density,
+        req.restricted_zone
+    ]]
 
-    # Decode label
-    risk_level = label_encoder.inverse_transform([risk_class])[0]
+    # Prediction
+    pred = model.predict(features)[0]
+    probs = model.predict_proba(features)[0]
 
-    return {
-        "timestamp": data.timestamp,
-        "latitude": data.latitude,
-        "longitude": data.longitude,
-        "risk_score": round(float(risk_score), 3),
-        "risk_level": risk_level
-    }
+    # Probability of the predicted class = risk score
+    pred_index = list(model.classes_).index(pred)
+    risk_score = float(probs[pred_index])
 
-
+    return {"risk_score": risk_score}
